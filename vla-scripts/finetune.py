@@ -106,7 +106,8 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
     assert torch.cuda.is_available(), "Fine-tuning assumes at least one GPU is available!"
-    distributed_state = PartialState()
+    #torch.distributed.init_process_group(backend='gloo')
+    distributed_state = PartialState(backend='gloo')
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
 
@@ -281,11 +282,13 @@ def finetune(cfg: FinetuneConfig) -> None:
             smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
 
             # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+            if distributed_state.is_main_process and gradient_step_idx % 1 == 0:
                 wandb.log(
                     {"train_loss": smoothened_loss, "action_accuracy": smoothened_action_accuracy, "l1_loss": smoothened_l1_loss}, step=gradient_step_idx
                 )
 
+            print(f"batch [{batch_idx}/{len(dataloader)}]  train_loss {smoothened_loss:06f}  action_accuracy {smoothened_action_accuracy:06f}  l1_loss {smoothened_l1_loss:06f}")
+            
             # Optimizer Step
             if (batch_idx + 1) % cfg.grad_accumulation_steps == 0:
                 optimizer.step()
