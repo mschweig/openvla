@@ -824,6 +824,10 @@ def tdroid_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def rlds_dataset_builder_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    return trajectory
+    
+    
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -897,4 +901,6 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "tdroid_cover_object_with_towel": tdroid_dataset_transform,
     ### DROID Finetuning datasets
     "droid_wipe": droid_finetuning_transform,
+    ### custom RLDS dataset builder
+    "rlds_dataset_builder": rlds_dataset_builder_transform,
 }
