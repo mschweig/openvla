@@ -21,6 +21,7 @@ Run with:
 import os
 import sys
 import time
+import json
 import pprint
 import signal
 import datetime
@@ -49,7 +50,10 @@ from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV1
 from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
-from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics, AttributeDict
+
+from merge import merge_lora
+
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -73,6 +77,7 @@ class FinetuneConfig:
     max_images: int = None                                          # Max number of training frames/images (overrides max_steps)
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
+    metric_steps: int = 16                                          # The number of batches to average loss/accuracy metrics over
     learning_rate: float = 2e-5                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     image_aug: bool = True                                          # Whether to train with image augmentations
@@ -90,8 +95,7 @@ class FinetuneConfig:
     tensorboard_logdir: str = "/data/logs/tensorboard"
     
     # fmt: on
-
-
+        
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
@@ -104,7 +108,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Configure Unique Experiment ID & Log Directory
     if not cfg.exp_id:
         cfg.exp_id = (
-            f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
+            f"{cfg.vla_path.split('/')[-1].split('+')[0]}+{cfg.dataset_name}"
             f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
             f"+lr-{cfg.learning_rate}"
         )
@@ -231,10 +235,16 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     print(f"\nDataset frames {len(vla_dataset):,} => batches {len(dataloader):,} => steps {len(dataloader)//cfg.grad_accumulation_steps:,} (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
 
-    # Deque to store recent train metrics (used for computing smoothened metrics for gradient accumulation)
-    recent_losses = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
-    recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
+    # Store recent train metrics (used for computing smoothened metrics for gradient accumulation)
+    metrics = AttributeDict(
+        loss = Metric('loss', 'Loss/logits'),
+        loss_action = Metric('loss_action', 'Loss/action'),
+        token_accuracy = Metric('token_accuracy', 'Accuracy/tokens'),
+        action_accuracy = Metric('action_accuracy', 'Accuracy/action'),
+    )
+    
+    for metric in metrics.values():
+        metric.resize(cfg.metric_steps, cfg.grad_accumulation_steps)
 
     # Keep filling data until the requested number of steps is reached
     def next_batch():
@@ -245,7 +255,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                     return
                 yield batch_idx, batch
                 batch_idx += 1
-    
+          
     # Allow the user to interrupt training with Ctrl+C
     interrupts = ProcessInterrupt()
     time_begin = time.perf_counter()
@@ -282,24 +292,15 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Compute Accuracy
             correct_preds = (action_preds == action_gt) & mask
-            action_accuracy = correct_preds.sum().float() / mask.sum().float()
-
+            metrics.token_accuracy += correct_preds.sum().float() / mask.sum().float()
+            metrics.loss += loss
+            
             # Compute L1 Loss on Predicted (Continuous) Actions
             continuous_actions_pred = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy()))
             continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
-            action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
-
-            # Store recent train metrics
-            recent_losses.append(loss.item())
-            recent_action_accuracies.append(action_accuracy.item())
-            recent_l1_losses.append(action_l1_loss.item())
-
-            # Compute smoothened train metrics
-            #   =>> Equal to current step metrics when not using gradient accumulation
-            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
-            smoothened_loss = sum(recent_losses) / len(recent_losses)
-            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
-            smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
+            
+            metrics.loss_action += torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
+            metrics.action_accuracy += 1.0 - metrics.loss_action[-1] 
 
             # Optimizer Step
             if batch_idx == 0 or batch_idx % cfg.grad_accumulation_steps != 0:
@@ -308,65 +309,118 @@ def finetune(cfg: FinetuneConfig) -> None:
             optimizer.step()
             optimizer.zero_grad()
                 
-            progress.set_description(f"loss={smoothened_loss:05f}  loss_action={smoothened_l1_loss:05f}  accuracy_tokens={smoothened_action_accuracy:05f}  accuracy_action={1-smoothened_l1_loss:05f}")
+            progress.set_description(f"{metrics.loss}  {metrics.token_accuracy}  {metrics.action_accuracy}")
             progress.update() # increments progress.n (global step count)
             print('')
             
             if distributed_state.is_main_process:
-                tensorboard.add_scalar('Loss/logits', smoothened_loss, progress.n)
-                tensorboard.add_scalar('Loss/action', smoothened_l1_loss, progress.n)
-                tensorboard.add_scalar('Accuracy/tokens', smoothened_action_accuracy, progress.n)
-                tensorboard.add_scalar('Accuracy/action', 1-smoothened_l1_loss, progress.n)
+                for metric in metrics.values():
+                    tensorboard.add_scalar(metric.tensorboard, metric.step_mean(), progress.n)
 
             if progress.n % cfg.save_steps == 0:
-                save_checkpoint(vla, processor, cfg, distributed_state, progress.n)
-         
+                if distributed_state.is_main_process:
+                    save_checkpoint(vla, processor, cfg, progress.n, metrics)
+                dist.barrier()
+                    
         # print training stats
         train_time = time.perf_counter() - time_begin
         train_frames = progress.n * cfg.batch_size * cfg.grad_accumulation_steps
         train_rate = train_frames / train_time
         
-        print(f"\nDone training after {progress.n} steps, {train_frames} frames  ({int(train_time)} seconds, {train_rate} fps)")
+        print(f"\nDone training after {progress.n} steps, {train_frames} frames  ({int(train_time)} seconds, {train_rate:.2f} fps)")
         
         # save final checkpoint and merge LoRA  
-        save_checkpoint(vla, processor, cfg, distributed_state, progress.n)
-        del vla  # reduce memory to be able to load LoRA
-        torch.cuda.empty_cache()
-        merge_lora(cfg, distributed_state)    
-                    
-
-def save_checkpoint(vla, processor, cfg, distributed_state, step):
-    # Save Model Checkpoint =>> by default, only keeps the latest checkpoint, continually overwriting it!
-    if distributed_state.is_main_process:
-        # If LoRA, we first save adapter weights, then merge into full model; otherwise, default save!
-        save_dir = cfg.adapter_tmp_dir if cfg.use_lora else cfg.run_root_dir
-        print(f"Saving Model Checkpoint for Step {step} under {save_dir}")
-
-        # Save Processor & Weights
-        processor.save_pretrained(cfg.run_root_dir)
-        vla.module.save_pretrained(save_dir)
-
-    # Wait for processor and adapter weights to be saved by main process
-    dist.barrier()
-
-
-def merge_lora(cfg, distributed_state):
-    # Merge LoRA weights into model backbone for faster inference
-    #   =>> Note that merging is slow and can be done post-hoc to speed up training
-    if cfg.use_lora and distributed_state.is_main_process:
-        print(f"Merging LoRA weights from {cfg.adapter_tmp_dir}")
-        base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-        )
-        merged_vla = PeftModel.from_pretrained(base_vla, cfg.adapter_tmp_dir)
-        merged_vla = merged_vla.merge_and_unload(progressbar=True)
-        merged_vla.save_pretrained(cfg.run_root_dir)
-        print(f"Saved merged LoRA weights to {cfg.run_root_dir}")
+        if distributed_state.is_main_process:
+            save_checkpoint(vla, processor, cfg, progress.n, metrics)
+            del vla  # reduce memory to be able to load LoRA
+            torch.cuda.empty_cache()
+            merge_lora(cfg.vla_path, cfg.adapter_tmp_dir, cfg.run_root_dir)  
+            
+        dist.barrier()
         
-    # Block on Main Process Checkpointing
-    dist.barrier()
 
+def save_checkpoint(vla, processor, cfg, steps, metrics):
+    # by default, only last checkpoint is kept, continually overwriting it!
+    # If LoRA, we first save adapter weights, then merge into full model; otherwise, default save!
+    save_dir = cfg.adapter_tmp_dir if cfg.use_lora else cfg.run_root_dir
+    print(f"Saving Model Checkpoint for Step {steps} under {save_dir}")
+    processor.save_pretrained(cfg.run_root_dir)
+    vla.module.save_pretrained(save_dir)
+    save_metrics(metrics, steps, cfg)
 
+     
+def save_metrics(metrics, steps, cfg):
+    for save_dir in [cfg.run_root_dir, cfg.adapter_tmp_dir]:
+        stats_path = save_dir / "train_stats.json"
+        stats_past = []
+        
+        try:
+            with open(stats_path, 'r') as f:
+                stats_past = json.load(f)
+        except Exception:
+            pass
+        
+        stats = {
+            'steps': steps, 
+            'frames': steps * cfg.batch_size * cfg.grad_accumulation_steps,   
+        }
+        
+        for metric in metrics.values():
+            stats[metric.name] = {
+                'step': metric.step_mean(),     
+                'mean': metric.mean(),
+            }
+
+        try:
+            with open(stats_path, 'w') as f:
+                json.dump(stats_past + [stats], f, indent=2)
+        except Exception as error:
+            print(f"Exception while saving training stats to {stats_path}\n  {error}")
+            
+    print(f"Saved training stats to {stats_path}")
+        
+        
+class Metric:
+    # Accumulate / average training stats
+    def __init__(self, name, tensorboard=None, window=10, step_window=None):
+        self.name = name
+        self.tensorboard = tensorboard
+        self.resize(window, step_window)
+     
+    def __str__(self):
+        return f"{self.name}={self.step_mean():.4f} ~{self.mean():.4f}"
+          
+    def __len__(self):
+        return len(self.history)
+    
+    def __getitem__(self, index):
+        return self.history[index]
+     
+    def __iadd__(self, value):
+        self.append(value)
+        return self
+        
+    def append(self, value):
+        if isinstance(value, torch.Tensor):
+            value = value.item()
+        self.history.append(value)
+           
+    def mean(self, window=None):
+        if window and window <= len(self.history):
+            history = [self.history[-x-1] for x in range(window)] #self.history[-window:]
+        else:
+            history = self.history
+        return sum(history) / len(history)      
+  
+    def step_mean(self):
+        return self.mean(self.step_window)
+        
+    def resize(self, window=10, step_window=None):
+        self.history = deque(maxlen=window)
+        self.window = window
+        self.step_window = step_window
+   
+   
 class ProcessInterrupt(threading.Thread):
     # Ctrl+D interrupt handler
     def __init__(self, **kwargs):
@@ -391,7 +445,7 @@ class ProcessInterrupt(threading.Thread):
                     print("\nPress Ctrl+D again for ungraceful termination\n")
                 else:
                     print("\nCtrl+D pressed, interrupting training...\n")
-            
-            
+ 
+          
 if __name__ == "__main__":
     finetune()
