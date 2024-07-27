@@ -51,6 +51,8 @@ from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics, AttributeDict
+from prismatic.vla.datasets.rlds.oxe.configs import OXE_DATASET_CONFIGS
+from prismatic.vla.datasets.rlds.oxe.transforms import OXE_STANDARDIZATION_TRANSFORMS, rlds_dataset_builder_transform
 
 from merge import merge_lora
 
@@ -77,7 +79,7 @@ class FinetuneConfig:
     max_images: int = None                                          # Max number of training frames/images (overrides max_steps)
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
-    metric_steps: int = 16                                          # The number of batches to average loss/accuracy metrics over
+    metric_steps: int = 8                                          # The number of batches to average loss/accuracy metrics over
     learning_rate: float = 2e-5                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     image_aug: bool = True                                          # Whether to train with image augmentations
@@ -95,7 +97,7 @@ class FinetuneConfig:
     tensorboard_logdir: str = "/data/logs/tensorboard"
     
     # fmt: on
-        
+       
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
@@ -191,6 +193,12 @@ def finetune(cfg: FinetuneConfig) -> None:
     #     prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
     # )
     # ---
+    if cfg.dataset_name not in OXE_DATASET_CONFIGS:
+        OXE_DATASET_CONFIGS[cfg.dataset_name] = OXE_DATASET_CONFIGS['rlds_dataset_builder']
+        
+    if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
+        OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
+        
     batch_transform = RLDSBatchTransform(
         action_tokenizer,
         processor.tokenizer,
