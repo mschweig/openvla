@@ -359,7 +359,7 @@ def save_checkpoint(vla, processor, cfg, steps, metrics):
      
 def save_metrics(metrics, steps, cfg):
     for save_dir in [cfg.run_root_dir, cfg.adapter_tmp_dir]:
-        stats_path = save_dir / "train_stats.json"
+        stats_path = save_dir / "train_statistics.json"
         stats_past = []
         
         try:
@@ -385,7 +385,7 @@ def save_metrics(metrics, steps, cfg):
         except Exception as error:
             print(f"Exception while saving training stats to {stats_path}\n  {error}")
             
-    print(f"Saved training stats to {stats_path}")
+    print(f"Saving training stats to {stats_path}")
         
         
 class Metric:
