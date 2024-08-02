@@ -30,10 +30,12 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
+from copy import deepcopy
 
 import draccus
 import torch
 import torch.distributed as dist
+import bitsandbytes as bnb
 import tqdm
 import contextlib
 
@@ -65,6 +67,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 class FinetuneConfig:
     # fmt: off
     exp_id: str = None                                              # Unique experiment ID (will be initialized if left None)
+    exp_tag: str = None                                             # Extra tag to end onto the end of experiment ID string
     vla_path: str = "openvla/openvla-7b"                            # Path to OpenVLA model (on HuggingFace Hub)
 
     # Directory Paths
@@ -79,9 +82,11 @@ class FinetuneConfig:
     max_images: int = None                                          # Max number of training frames/images (overrides max_steps)
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
-    metric_steps: int = 8                                          # The number of batches to average loss/accuracy metrics over
+    metric_steps: int = 8                                           # The number of batches to average loss/accuracy metrics over
+    resume_step: int = 0                                            # Global Step to Resume (should match checkpoint)
     learning_rate: float = 2e-5                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
+    optim_bits: int = 32                                            # 32-bit or 8-bit precision for AdamW solver
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
 
@@ -118,6 +123,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg.exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
         if cfg.use_quantization:
             cfg.exp_id += "+q-4bit"
+        if cfg.exp_tag:
+            cfg.exp_id += f"+{cfg.exp_tag}"
         cfg.exp_id += f"+{datetime.datetime.now().strftime('%y%m%d_%H%M')}"
      
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`  ({cfg.exp_id})")
@@ -173,7 +180,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    optimizer = AdamW(trainable_params, lr=cfg.learning_rate)
+    optimizer = bnb.optim.AdamW(trainable_params, lr=cfg.learning_rate, optim_bits=cfg.optim_bits)
 
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
@@ -194,7 +201,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     # )
     # ---
     if cfg.dataset_name not in OXE_DATASET_CONFIGS:
-        OXE_DATASET_CONFIGS[cfg.dataset_name] = OXE_DATASET_CONFIGS['rlds_dataset_builder']
+        data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
+        #data_cfg['image_obs_keys']['primary'] = 'wrist_image'
+        OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
         
     if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
         OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
@@ -269,7 +278,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     time_begin = time.perf_counter()
     
     # Train!
-    with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
+    with tqdm.tqdm(initial=cfg.resume_step, total=cfg.max_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
         
