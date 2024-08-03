@@ -198,7 +198,7 @@ class Exp_SigLIP_224px_Droid_Wipe(Exp_SigLIP_224px_Bridge):
     data_mix: str = "droid_wipe"
 
 
-# = [2 GPU] Fine-tuning + custom dataset
+# = [8 GPU] Fine-tuning + custom dataset
 @dataclass
 class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
     vla_id: str = "prism-dinosiglip-224px+ft"
@@ -206,12 +206,12 @@ class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
 
     data_mix: str = "stack_d1_ep500_agentview"
     
-    epochs: int = 1000
+    #epochs: int = 1000
     #max_steps: Optional[int] = None
 
-    expected_world_size: int = 1
-    global_batch_size: int = 2 #256
-    per_device_batch_size: int = 2 #32
+    #expected_world_size: int = 1
+    #global_batch_size: int = 2 #256
+    #per_device_batch_size: int = 2 #32
     
     #expected_world_size: int = 2
     #global_batch_size: int = 4
