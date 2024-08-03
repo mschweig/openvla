@@ -118,7 +118,7 @@ def train(cfg: TrainConfig) -> None:
     # Configure Unique Run Name & Save Directory
     vla_id = cfg.vla.vla_id
     cfg.run_id = (
-        f"{vla_id}+n{cfg.vla.expected_world_size // 8}+b{cfg.per_device_batch_size}+x{cfg.seed}"
+        f"{vla_id}+{cfg.dataset_name}+n{cfg.vla.expected_world_size // 8}+b{cfg.per_device_batch_size}+x{cfg.seed}"
         if cfg.run_id is None
         else cfg.run_id
     )
