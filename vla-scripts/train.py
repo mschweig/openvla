@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple, Union
+from copy import deepcopy
 
 import draccus
 import torch
@@ -34,6 +35,10 @@ from prismatic.training import VLAMetrics, get_train_strategy
 from prismatic.util import set_global_seed
 from prismatic.vla import get_vla_dataset_and_collator
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
+
+from prismatic.vla.datasets.rlds.oxe.configs import OXE_DATASET_CONFIGS
+from prismatic.vla.datasets.rlds.oxe.transforms import OXE_STANDARDIZATION_TRANSFORMS, rlds_dataset_builder_transform
+
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -53,9 +58,8 @@ class TrainConfig:
     )
 
     # Directory Paths
-    data_root_dir: Path = Path(                                     # Path to Open-X dataset directory
-        "datasets/open-x-embodiment"
-    )
+    data_root_dir: Path = Path("datasets/open-x-embodiment")        # Path to Open-X dataset directory
+    dataset_name: str = "droid_wipe"                                # Name of fine-tuning dataset (e.g., `droid_wipe`)
     run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
 
     # Resume Run Parameters
@@ -187,7 +191,16 @@ def train(cfg: TrainConfig) -> None:
     )
 
     # Get VLA Dataset & Collator
-    overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")
+    overwatch.info(f"Creating VLA Dataset {cfg.dataset_name} with Mixture `{cfg.vla.data_mix}`")
+    
+    if cfg.dataset_name not in OXE_DATASET_CONFIGS:
+        data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
+        #data_cfg['image_obs_keys']['primary'] = 'wrist_image'
+        OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
+        
+    if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
+        OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
+        
     vla_dataset, action_tokenizer, collator = get_vla_dataset_and_collator(
         cfg.data_root_dir,
         cfg.vla.data_mix,

@@ -107,7 +107,7 @@ class Exp_DinoSigLIP_224px_Bridge(Exp_SigLIP_224px_Bridge):
 
     data_mix: str = "bridge"
 
-
+    
 # = [64 GPU] SigLIP 224px + OXE Magic Soup =
 @dataclass
 class Exp_SigLIP_224px_OXE_Magic_Soup(Exp_SigLIP_224px_Bridge):
@@ -198,13 +198,29 @@ class Exp_SigLIP_224px_Droid_Wipe(Exp_SigLIP_224px_Bridge):
     data_mix: str = "droid_wipe"
 
 
+# = [2 GPU] Fine-tuning + custom dataset
+@dataclass
+class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
+    vla_id: str = "prism-dinosiglip-224px+ft"
+    base_vlm: Union[str, Path] = "prism-dinosiglip-224px+7b"
+
+    data_mix: str = "stack_d1_ep500_agentview"
+    
+    expected_world_size: int = 2
+    global_batch_size: int = 4
+    per_device_batch_size: int = 2
+    
+    shuffle_buffer_size: int = 16_000
+    
+    
 # === Define a VLA Registry Enum for Reference & Validation ===
 @unique
 class VLARegistry(Enum):
     # Sanity Check Configurations =>> BridgeV2
     SIGLIP_224PX_MX_BRIDGE = Exp_SigLIP_224px_Bridge
     DINOSIGLIP_224PX_MX_BRIDGE = Exp_DinoSigLIP_224px_Bridge
-
+    DINOSIGLIP_224PX_FT = Exp_DinoSigLIP_224px_FT
+    
     # SigLIP Frozen Backbone Experiment
     FREEZE_SIGLIP_224PX_MX_BRIDGE = Exp_FreezeVIT_SigLIP_224px_Bridge
 
