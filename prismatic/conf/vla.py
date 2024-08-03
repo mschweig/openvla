@@ -206,7 +206,7 @@ class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
 
     data_mix: str = "stack_d1_ep500_agentview"
     
-    epochs: int = 10
+    epochs: int = 1000
     #max_steps: Optional[int] = None
 
     expected_world_size: int = 1
