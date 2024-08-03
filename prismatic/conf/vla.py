@@ -210,8 +210,8 @@ class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
     #max_steps: Optional[int] = None
 
     expected_world_size: int = 1
-    global_batch_size: int = 16 #256
-    per_device_batch_size: int = 16 #32
+    global_batch_size: int = 2 #256
+    per_device_batch_size: int = 2 #32
     
     #expected_world_size: int = 2
     #global_batch_size: int = 4
