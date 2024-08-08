@@ -28,8 +28,9 @@ import datetime
 import threading
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import List
 from copy import deepcopy
 
 import draccus
@@ -55,6 +56,7 @@ from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics, AttributeDict
 from prismatic.vla.datasets.rlds.oxe.configs import OXE_DATASET_CONFIGS
 from prismatic.vla.datasets.rlds.oxe.transforms import OXE_STANDARDIZATION_TRANSFORMS, rlds_dataset_builder_transform
+from prismatic.vla.sim.mimicgen import MGStreamingDataset
 
 from merge import merge_lora
 
@@ -76,6 +78,13 @@ class FinetuneConfig:
     run_root_dir: Path = Path("runs")                               # Path to directory to store logs & checkpoints
     adapter_tmp_dir: Path = None                                    # Temporary directory for LoRA weights before fusing
 
+    # Sim settings
+    tasks: List[str] = field(default_factory=list)                  # List of MimicGen tasks to simulate
+    task_weights: List[str] = field(default_factory=list)           # Task selection frequency distribution
+    camera: str = "agentview"                                       # Camera to use (agentview, frontview, robot0-eye_in_hand)
+    save_dir: Path = None                                           # Directory to dump sample generated episodes to (optional)
+    save_freq: int = None                                           # Save every N generated episodes for viewing (optional)
+    
     # Fine-tuning Parameters
     batch_size: int = 16                                            # Fine-tuning batch size
     epochs: int = None                                              # Number of training passes through dataset (overrides max_steps)
@@ -185,43 +194,50 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
-    # Load Fine-tuning Dataset =>> note that we use an RLDS-formatted dataset following Open X-Embodiment by default.
-    #   =>> If you want to use a non-RLDS dataset (e.g., a standard PyTorch Dataset) see the following commented block.
-    #   =>> Note that our training code does not loop over epochs because the RLDS loader does this implicitly; if using
-    #       your own Dataset, make sure to add the appropriate logic to the training loop!
-    #
-    # ---
-    # from prismatic.vla.datasets import DummyDataset
-    #
-    # vla_dataset = DummyDataset(
-    #     action_tokenizer,
-    #     processor.tokenizer,
-    #     image_transform=processor.image_processor.apply_transform,
-    #     prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
-    # )
-    # ---
-    if cfg.dataset_name not in OXE_DATASET_CONFIGS:
-        data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
-        #data_cfg['image_obs_keys']['primary'] = 'wrist_image'
-        OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
-        
-    if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
-        OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
-        
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer,
-        processor.tokenizer,
-        image_transform=processor.image_processor.apply_transform,
-        prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
-    )
-    vla_dataset = RLDSDataset(
-        cfg.data_root_dir,
-        cfg.dataset_name,
-        batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
-        shuffle_buffer_size=cfg.shuffle_buffer_size,
-        image_aug=cfg.image_aug,
-    )
+    # Load Fine-tuning Dataset => RLDS/OXE or simulated
+    if cfg.dataset_name.lower() == 'mimicgen':
+        vla_dataset = MGStreamingDataset(
+            cfg.tasks,
+            cfg.task_weights,
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+            resize_resolution=tuple(vla.module.config.image_sizes),
+            shuffle=bool(cfg.shuffle_buffer_size > 0),
+            image_aug=cfg.image_aug,
+            camera=cfg.camera,
+            save_dir=cfg.save_dir,
+            save_freq=cfg.save_freq,
+        )
+    else:
+        if cfg.dataset_name not in OXE_DATASET_CONFIGS:
+            data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
+            OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
+            
+        if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
+            OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
+            
+        batch_transform = RLDSBatchTransform(
+            action_tokenizer,
+            processor.tokenizer,
+            image_transform=processor.image_processor.apply_transform,
+            prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
+        )
+        vla_dataset = RLDSDataset(
+            cfg.data_root_dir,
+            cfg.dataset_name,
+            batch_transform,
+            resize_resolution=tuple(vla.module.config.image_sizes),
+            shuffle_buffer_size=cfg.shuffle_buffer_size,
+            image_aug=cfg.image_aug,
+        )
+
+    # Simulated datasets don't have a length because they're streamed forever
+    try:
+        simulated = bool(len(vla_dataset) <= 0)
+    except:
+        simulated = True
 
     # [Important] Save Dataset Statistics =>> used to de-normalize actions for inference!
     if distributed_state.is_main_process:
@@ -240,7 +256,9 @@ def finetune(cfg: FinetuneConfig) -> None:
     )
 
     if cfg.epochs:
-        cfg.max_steps = int(len(dataloader) * cfg.epochs / cfg.grad_accumulation_steps)
+        if simulated:
+            raise ValueError(f"cannot train for number of epochs when simulator is used")
+        cfg.max_steps = int(len(vla_dataset) * cfg.epochs / cfg.batch_size / cfg.grad_accumulation_steps) #int(len(dataloader) * cfg.epochs / cfg.grad_accumulation_steps)
  
     if cfg.max_images:
         cfg.max_steps = int(cfg.max_images / cfg.batch_size / cfg.grad_accumulation_steps)
@@ -250,8 +268,11 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.tensorboard_logdir = os.path.join(cfg.tensorboard_logdir, cfg.exp_id)
         tensorboard = SummaryWriter(log_dir=cfg.tensorboard_logdir)
 
-    print(f"\nDataset frames {len(vla_dataset):,} => batches {len(dataloader):,} => steps {len(dataloader)//cfg.grad_accumulation_steps:,} (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
-
+    if simulated:
+        print(f"\nSimulator tasks {cfg.tasks}  (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
+    else:
+        print(f"\nDataset frames {len(vla_dataset):,} => batches {len(dataloader):,} => steps {len(dataloader)//cfg.grad_accumulation_steps:,} (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
+    
     # Store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     metrics = AttributeDict(
         loss = Metric('loss', 'Loss/logits'),
