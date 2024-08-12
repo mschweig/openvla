@@ -6,6 +6,7 @@ Additional RLDS-specific data utilities.
 
 import hashlib
 import json
+import copy
 import os
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -273,6 +274,7 @@ def get_dataset_statistics(
 
 def save_dataset_statistics(dataset_statistics, run_dir):
     """Saves a `dataset_statistics.json` file."""
+    dataset_statistics = copy.deepcopy(dataset_statistics)
     out_path = run_dir / "dataset_statistics.json"
     with open(out_path, "w") as f_json:
         for _, stats in dataset_statistics.items():
