@@ -102,8 +102,8 @@ class MGStreamingDataset(IterableDataset):
         self.dataset_statistics = {
             "mimicgen": {
                 "action": {
-                    "q01": np.array([-1.0] * 6 + [0.0], dtype=np.float32), 
-                    "q99": np.array([1.0] * 7, dtype=np.float32),
+                    "q01": np.array([-1,-1,-1,-0.25,-0.25,-1.0,0.0], dtype=np.float32),   # [-1.0] * 6 + [0.0]
+                    "q99": np.array([1.0,1.0,1.0,0.25,0.25,1.0,1.0], dtype=np.float32),   # [1.0] * 7
                     "mask": np.array([True] * 6 + [False], dtype=bool),
                  }
             }
@@ -161,8 +161,8 @@ class MGStreamingDataset(IterableDataset):
         env_meta = get_env_metadata_from_dataset(dataset_path=source_dataset_path)
 
         # set seed for generation TODO augment by PID?
-        random.seed(mg_config.experiment.seed + torch.distributed.get_rank())
-        np.random.seed(mg_config.experiment.seed + torch.distributed.get_rank())
+        #random.seed(mg_config.experiment.seed + torch.distributed.get_rank())
+        #np.random.seed(mg_config.experiment.seed + torch.distributed.get_rank())
 
         # get list of source demonstration keys from source hdf5
         all_demos = MG_FileUtils.get_all_demos_from_dataset(
@@ -255,6 +255,15 @@ class MGStreamingDataset(IterableDataset):
         
         # invert gripper from [-1,1] to [0,1]
         action[-1] = 1.0 - ((action[-1] + 1.0) * 0.5) 
+
+        # apply normalization
+        action_stats = self.dataset_statistics['mimicgen']['action']
+        #print('action', type(action), 'q01', type(action_stats['q01']))
+        action = np.clip(np.where(
+            action_stats['mask'],
+            2 * (action - action_stats['q01']) / (action_stats['q99'] - action_stats['q01']) - 1,
+            action,
+        ), a_min=-1, a_max=1)
 
         # Add instruction to VLA prompt
         prompt_builder = self.prompt_builder_fn("openvla")
