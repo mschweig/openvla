@@ -123,8 +123,11 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Configure Unique Experiment ID & Log Directory
     if not cfg.exp_id:
+        data_exp = cfg.dataset_name
+        if cfg.tasks:
+            data_exp = data_exp + '+' + '+'.join(cfg.tasks)
         cfg.exp_id = (
-            f"{cfg.vla_path.split('/')[-1].split('+')[0]}+{cfg.dataset_name}"
+            f"{cfg.vla_path.split('/')[-1].split('+')[0]}+{data_exp}"
             f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
             f"+lr-{cfg.learning_rate}"
         )
