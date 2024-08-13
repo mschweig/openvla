@@ -102,8 +102,8 @@ class MGStreamingDataset(IterableDataset):
         self.dataset_statistics = {
             "mimicgen": {
                 "action": {
-                    "q01": np.array([-1,-1,-1,-0.25,-0.25,-1.0,0.0], dtype=np.float32),   # [-1.0] * 6 + [0.0]
-                    "q99": np.array([1.0,1.0,1.0,0.25,0.25,1.0,1.0], dtype=np.float32),   # [1.0] * 7
+                    "q01": np.array([-1.0, -1.0, -0.8261683106422424, -0.1516124576330185, -0.1935320883989334, -1.0, 0.0], dtype=np.float32), #np.array([-1,-1,-1,-0.25,-0.25,-1.0,0.0], dtype=np.float32),   # [-1.0] * 6 + [0.0]
+                    "q99": np.array([1.0, 1.0, 0.9962790727615359, 0.152607223391533, 0.20217267274856587, 1.0, 1.0], dtype=np.float32), #np.array([1.0,1.0,1.0,0.25,0.25,1.0,1.0], dtype=np.float32),   # [1.0] * 7
                     "mask": np.array([True] * 6 + [False], dtype=bool),
                  }
             }
@@ -268,7 +268,7 @@ class MGStreamingDataset(IterableDataset):
         # Add instruction to VLA prompt
         prompt_builder = self.prompt_builder_fn("openvla")
         conversation = [
-            {"from": "human", "value": f"What action should the robot take to {episode['instruction']}?"},
+            {"from": "human", "value": f"What action should the robot take to {episode['instructions'][frame]}?"},
             {"from": "gpt", "value": self.action_tokenizer(action)},
         ]
         for turn in conversation:
@@ -314,7 +314,7 @@ class MGStreamingDataset(IterableDataset):
             if not success:
                 continue
             
-            episode['instruction'] = generate_instruction(task.config.name, task.env, shuffle=task.num_episodes)
+            #episode['instruction'] = generate_instruction(task.config.name, task.env, shuffle=task.num_episodes)
             
             if self.save_freq and self.episodes % self.save_freq == 0 or self.episodes < 3:
                 video_file = os.path.join(self.save_dir, f"{self.episodes}.mp4")
@@ -324,7 +324,7 @@ class MGStreamingDataset(IterableDataset):
                 print(f"MimicGen | saved episode {self.episodes} to {video_file}")
                 with open(os.path.join(self.save_dir, f"{self.episodes}.json"), 'w') as f:
                     json.dump({
-                        'instruction': episode['instruction'],
+                        'instructions': episode['instructions'],
                         'actions': episode['actions'].tolist(),
                     }, f, indent=2)
 
