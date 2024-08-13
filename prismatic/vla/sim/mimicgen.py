@@ -8,8 +8,6 @@ import os
 import time
 import json
 import random
-import imageio
-import mimicgen
 
 import PIL
 import torch
@@ -27,31 +25,40 @@ from prismatic.models.backbones.vision import ImageTransform
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
-from mimicgen.configs import config_factory, MG_TaskSpec
-from mimicgen.generate import generate as generate_configs, generate_instruction
-from mimicgen.datagen.data_generator import DataGenerator
-from mimicgen.env_interfaces.base import make_interface, MG_EnvInterface
+try:
+    import mimicgen
+    import imageio
 
-from robomimic.utils.file_utils import get_env_metadata_from_dataset
-from robosuite.environments.robot_env import RobotEnv
+    from mimicgen.configs import config_factory, MG_TaskSpec
+    from mimicgen.generate import generate as generate_configs, generate_instruction
+    from mimicgen.datagen.data_generator import DataGenerator
+    from mimicgen.env_interfaces.base import make_interface, MG_EnvInterface
 
-import mimicgen.utils.file_utils as MG_FileUtils
-import mimicgen.utils.robomimic_utils as RobomimicUtils
+    from robomimic.utils.file_utils import get_env_metadata_from_dataset
+    from robosuite.environments.robot_env import RobotEnv
 
+    import mimicgen.utils.file_utils as MG_FileUtils
+    import mimicgen.utils.robomimic_utils as RobomimicUtils
 
+    @dataclass
+    class MGTrainingTask:
+        config: dict
+        env: RobotEnv
+        env_interface: MG_EnvInterface
+        data_generator: DataGenerator
+        num_episodes: int = 0
+ 
+    USE_MIMICGEN=True
+    
+except Exception as error:
+    print(f"OpenVLA installed without MimicGen support, disabling simulator ({error})")
+    USE_MIMICGEN=False
+ 
+ 
 # HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
-IGNORE_INDEX = -100
-
-
-@dataclass
-class MGTrainingTask:
-    config: dict
-    env: RobotEnv
-    env_interface: MG_EnvInterface
-    data_generator: DataGenerator
-    num_episodes: int = 0
+IGNORE_INDEX = -100   
     
-    
+ 
 class MGStreamingDataset(IterableDataset):
     """
     Streaming dataset simulator using MimicGen (mimicgen.github.io/)
@@ -73,6 +80,9 @@ class MGStreamingDataset(IterableDataset):
         """
         PyTorch dataset connector for live MimicGen training examples.
         """
+        if not USE_MIMICGEN:
+            raise ImportError("mimicgen not installed or encountered errors during import")
+            
         if not tasks:
             raise ValueError("requires at least one mimicgen task / environment")
             
