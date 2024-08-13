@@ -36,6 +36,7 @@ from copy import deepcopy
 import draccus
 import torch
 import torch.distributed as dist
+import numpy as np
 import bitsandbytes as bnb
 import tqdm
 import contextlib
@@ -330,19 +331,29 @@ def finetune(cfg: FinetuneConfig) -> None:
             action_preds = action_logits.argmax(dim=2)
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
             mask = action_gt > action_tokenizer.action_token_begin_idx
-
+                
             # Compute Accuracy
             correct_preds = (action_preds == action_gt) & mask
             metrics.token_accuracy += correct_preds.sum().float() / mask.sum().float()
-            metrics.loss += loss
-            
+
             # Compute L1 Loss on Predicted (Continuous) Actions
             continuous_actions_pred = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy()))
             continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
-            
+
             metrics.loss_action += torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
             metrics.action_accuracy += 1.0 - metrics.loss_action[-1] 
 
+            if progress.n > 10 and loss >= metrics.loss.mean() * 1.3:
+                print(f"Step {progress.n}, abnormal loss detected:  loss={loss}  avg={metrics.loss.mean()}")
+                dump_step(
+                    progress.n, cfg,
+                    metrics=dict(step=progress.n, loss=float(loss), prev_loss=metrics.loss.mean(), token_accuracy=metrics.token_accuracy.history[-1], action_accuracy=metrics.action_accuracy.history[-1]),
+                    inputs=batch,
+                    outputs=dict(action_preds=action_preds, action_gt=action_gt, continuous_actions_pred=continuous_actions_pred, continuous_actions_gt=continuous_actions_gt)
+                )
+                    
+            metrics.loss += loss
+            
             # Optimizer Step
             if batch_idx == 0 or batch_idx % cfg.grad_accumulation_steps != 0:
                 continue
@@ -420,7 +431,32 @@ def save_metrics(metrics, steps, cfg):
             
     print(f"Saving training stats to {stats_path}")
         
-        
+
+def dump_step(step, cfg, metrics, inputs, outputs):
+    for save_dir in [cfg.run_root_dir, cfg.adapter_tmp_dir]:
+        save_dir = save_dir / "debug"
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = save_dir / f"rank={torch.distributed.get_rank()}_step={step}.json"
+        try:
+            for k,v in inputs.items(): 
+                if isinstance(v, (np.ndarray, torch.Tensor)):
+                    inputs[k] = v = v.tolist()
+                if isinstance(v, list) and len(v) > 0 and isinstance(v[0], bytes):
+                    for vi, vb in enumerate(v):
+                        v[vi] = vb.decode("utf-8")
+            for k,v in outputs.items():
+                if isinstance(v, (np.ndarray, torch.Tensor)):
+                    outputs[k] = v = v.tolist()
+            with open(save_path, 'w') as f:
+                json.dump(dict(
+                    metrics=metrics,
+                    inputs=inputs,
+                    outputs=outputs,
+                ), f, indent=2)
+        except Exception as error:
+            print(f"Exception while saving training stats to {save_path}\n  {error}")
+    print(f"Saved debug dump to {save_path}")
+                   
 class Metric:
     # Accumulate / average training stats
     def __init__(self, name, tensorboard=None, window=10, step_window=None):
