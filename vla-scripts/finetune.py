@@ -57,7 +57,9 @@ from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics, AttributeDict
 from prismatic.vla.datasets.rlds.oxe.configs import OXE_DATASET_CONFIGS
 from prismatic.vla.datasets.rlds.oxe.transforms import OXE_STANDARDIZATION_TRANSFORMS, rlds_dataset_builder_transform
+
 from prismatic.vla.sim.mimicgen import MGStreamingDataset
+from prismatic.util.grokfast import gradfilter_ma, gradfilter_ema
 
 from merge import merge_lora
 
@@ -96,7 +98,9 @@ class FinetuneConfig:
     resume_step: int = 0                                            # Global Step to Resume (should match checkpoint)
     learning_rate: float = 2e-5                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
-    optim_bits: int = 32                                            # 32-bit or 8-bit precision for AdamW solver
+    grad_filter: str = None                                         # Use 'ema' or 'ma' to enable grokfast 
+
+    #optim_bits: int = 32                                            # 32-bit or 8-bit precision for AdamW solver
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
 
@@ -193,8 +197,9 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Create Optimizer =>> note that we default to a simple constant learning rate!
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
-    optimizer = bnb.optim.AdamW(trainable_params, lr=cfg.learning_rate, optim_bits=cfg.optim_bits)
-
+    optimizer = AdamW(trainable_params, lr=cfg.learning_rate) #bnb.optim.AdamW(trainable_params, lr=cfg.learning_rate, optim_bits=cfg.optim_bits)
+    grads = None
+        
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
@@ -357,7 +362,17 @@ def finetune(cfg: FinetuneConfig) -> None:
             # Optimizer Step
             if batch_idx == 0 or batch_idx % cfg.grad_accumulation_steps != 0:
                 continue
-                
+   
+            if cfg.grad_filter == 'ema':
+                grads = gradfilter_ema(vla, grads=grads, alpha=0.98, lamb=2.0)
+            elif cfg.grad_filter == 'ma':
+                grads = gradfilter_ma(vla, grads=grads, window_size=100, lamb=lamb)
+            elif cfg.grad_filter:
+                raise ValueError(f"grad_filter should be 'ema' or 'ma' (was {cfg.grad_filter})")
+             
+            if cfg.grad_filter and progress.n == 0:
+                print(f"using grad_filter {cfg.grad_filter}")
+                  
             optimizer.step()
             optimizer.zero_grad()
                 
