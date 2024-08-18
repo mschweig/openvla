@@ -20,6 +20,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from pprint import pformat
 from typing import Optional, Tuple, Union
 from copy import deepcopy
 
@@ -99,10 +100,17 @@ class TrainConfig:
 
         self.train_strategy = self.vla.train_strategy
 
+        if not self.vla.data_mix:
+            self.vla.data_mix = self.dataset_name
+        
+        if not self.vla.expected_world_size:
+            self.vla.expected_world_size = overwatch.world_size()
+            
         # [Validate] Assert on `expected_world_size`
-        assert (
-            self.vla.expected_world_size == overwatch.world_size()
-        ), f"Expected World Size = {self.vla.expected_world_size} but Found {overwatch.world_size()} GPUs!"
+        if self.vla.expected_world_size:
+            assert (
+                self.vla.expected_world_size == overwatch.world_size()
+            ), f"Expected World Size = {self.vla.expected_world_size} but Found {overwatch.world_size()} GPUs!"
 
     # fmt: on
 
@@ -110,7 +118,8 @@ class TrainConfig:
 @draccus.wrap()
 def train(cfg: TrainConfig) -> None:
     overwatch.info("OpenVLA Training :: Warming Up")
-
+    overwatch.info(pformat(cfg, indent=2))
+    
     # Note => Under `torchrun` initializing `overwatch` will automatically set up `torch.distributed`
     torch.cuda.set_device(device_id := overwatch.local_rank())
     torch.cuda.empty_cache()
@@ -195,7 +204,6 @@ def train(cfg: TrainConfig) -> None:
     
     if cfg.dataset_name not in OXE_DATASET_CONFIGS:
         data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
-        #data_cfg['image_obs_keys']['primary'] = 'wrist_image'
         OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
         
     if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:

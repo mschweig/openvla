@@ -8,6 +8,7 @@ model configuration thereof. A given VLA model (`policy`) configures the followi
     - VLA Model Architecture / Parameters (e.g., freeze vision encoder, last layer finetuning)
     - Training / Optimization Hyperparameters
 """
+import os
 
 from dataclasses import dataclass
 from enum import Enum, unique
@@ -198,26 +199,18 @@ class Exp_SigLIP_224px_Droid_Wipe(Exp_SigLIP_224px_Bridge):
     data_mix: str = "droid_wipe"
 
 
-# = [8 GPU] Fine-tuning + custom dataset
+# = [N GPU] Fine-tuning + custom dataset
 @dataclass
 class Exp_DinoSigLIP_224px_FT(Exp_SigLIP_224px_Bridge):
     vla_id: str = "prism-dinosiglip-224px+ft"
     base_vlm: Union[str, Path] = "prism-dinosiglip-224px+7b"
+    data_mix: str = None
+    expected_world_size: int = None
 
-    data_mix: str = "stack_d1_ep500_agentview"
-    
-    #epochs: int = 1000
-    #max_steps: Optional[int] = None
-
-    #expected_world_size: int = 1
-    #global_batch_size: int = 2 #256
-    #per_device_batch_size: int = 2 #32
-    
-    #expected_world_size: int = 2
-    #global_batch_size: int = 4
-    #per_device_batch_size: int = 2
-    
-    #shuffle_buffer_size: int = 16_000
+    #expected_world_size: int = 8
+    #global_batch_size: int = 256
+    #per_device_batch_size: int = 32
+    #shuffle_buffer_size: int = 256_000
     
     
 # === Define a VLA Registry Enum for Reference & Validation ===
