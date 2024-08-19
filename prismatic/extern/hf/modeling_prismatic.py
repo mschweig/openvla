@@ -514,17 +514,29 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
         )
 
+        if isinstance(unnorm_key, str):
+            if unnorm_key == 'normalized':
+                unnorm_key = None
+            else:
+                action_norm_stats = self.get_action_stats(unnorm_key)
+        elif isinstance(unnorm_key, dict):
+            action_norm_stats = unnorm_key
+
+        num_actions = len(action_norm_stats["q01"]) if unnorm_key else 7
+        
         # Run VLA inference
-        generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
+        generated_ids = self.generate(input_ids, max_new_tokens=num_actions, **kwargs)
 
         # Extract predicted action tokens and translate into (normalized) continuous actions
-        predicted_action_token_ids = generated_ids[0, -self.get_action_dim(unnorm_key) :].cpu().numpy()
+        predicted_action_token_ids = generated_ids[0, -num_actions :].cpu().numpy()
         discretized_actions = self.vocab_size - predicted_action_token_ids
         discretized_actions = np.clip(discretized_actions - 1, a_min=0, a_max=self.bin_centers.shape[0] - 1)
         normalized_actions = self.bin_centers[discretized_actions]
 
+        if not unnorm_key:
+            return normalized_actions
+            
         # Unnormalize actions
-        action_norm_stats = self.get_action_stats(unnorm_key)
         mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
         action_high, action_low = np.array(action_norm_stats["q99"]), np.array(action_norm_stats["q01"])
         actions = np.where(
