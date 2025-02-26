@@ -513,7 +513,6 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
-<<<<<<< HEAD
 
         if isinstance(unnorm_key, str):
             if unnorm_key == 'normalized':
@@ -522,8 +521,6 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 action_norm_stats = self.get_action_stats(unnorm_key)
         elif isinstance(unnorm_key, dict):
             action_norm_stats = unnorm_key
-=======
->>>>>>> upstream/main
 
         num_actions = len(action_norm_stats["q01"]) if unnorm_key else 7
         
