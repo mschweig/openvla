@@ -30,7 +30,11 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+<<<<<<< HEAD
 from typing import Optional, List
+=======
+from typing import Optional
+>>>>>>> upstream/main
 
 import draccus
 import torch
@@ -63,6 +67,10 @@ from prismatic.util.grokfast import gradfilter_ma, gradfilter_ema
 
 from merge import merge_lora
 
+
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
 
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
@@ -117,8 +125,11 @@ class FinetuneConfig:
     max_images: int = None                                          # Max number of training frames/images (overrides max_steps)
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
+<<<<<<< HEAD
     metric_steps: int = 8                                           # The number of batches to average loss/accuracy metrics over
     resume_step: int = 0                                            # Fine-tuning learning rate
+=======
+>>>>>>> upstream/main
     learning_rate: float = 5e-4                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     grad_filter: str = None                                         # Use 'ema' or 'ma' to enable grokfast
@@ -140,8 +151,11 @@ class FinetuneConfig:
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
+<<<<<<< HEAD
 
     tensorboard_logdir: str = "/data/logs/tensorboard"
+=======
+>>>>>>> upstream/main
 
     # fmt: on
 
@@ -155,6 +169,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.empty_cache()
 
     # Configure Unique Experiment ID & Log Directory
+<<<<<<< HEAD
     if not cfg.exp_id:
         data_exp = cfg.dataset_name
         if cfg.tasks:
@@ -174,6 +189,21 @@ def finetune(cfg: FinetuneConfig) -> None:
             exp_id += "--image_aug"
         cfg.exp_id += f"+{datetime.datetime.now().strftime('%y%m%d_%H%M')}"
     print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
+=======
+    exp_id = (
+        f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
+        f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
+        f"+lr-{cfg.learning_rate}"
+    )
+    if cfg.use_lora:
+        exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
+    if cfg.use_quantization:
+        exp_id += "+q-4bit"
+    if cfg.run_id_note is not None:
+        exp_id += f"--{cfg.run_id_note}"
+    if cfg.image_aug:
+        exp_id += "--image_aug"
+>>>>>>> upstream/main
 
     # Start =>> Build Directories
     if not cfg.adapter_tmp_dir:
@@ -498,6 +528,7 @@ def finetune(cfg: FinetuneConfig) -> None:
                 print(f"Max step {cfg.max_steps} reached! Stopping training...")
                 break
 
+<<<<<<< HEAD
 
 def save_checkpoint(vla, processor, cfg, steps, metrics):
     # by default, only last checkpoint is kept, continually overwriting it!
@@ -631,6 +662,8 @@ class ProcessInterrupt(threading.Thread):
                 else:
                     print("\nCtrl+D pressed, interrupting training...\n")
 
+=======
+>>>>>>> upstream/main
 
 if __name__ == "__main__":
     finetune()

@@ -841,10 +841,13 @@ def libero_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+<<<<<<< HEAD
 def rlds_dataset_builder_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+=======
+>>>>>>> upstream/main
 # === Registry ===
 OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
@@ -923,6 +926,9 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "libero_object_no_noops": libero_dataset_transform,
     "libero_goal_no_noops": libero_dataset_transform,
     "libero_10_no_noops": libero_dataset_transform,
+<<<<<<< HEAD
     ### custom RLDS dataset builder
     "rlds_dataset_builder": rlds_dataset_builder_transform,
+=======
+>>>>>>> upstream/main
 }
