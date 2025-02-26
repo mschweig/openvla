@@ -30,11 +30,8 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-<<<<<<< HEAD
-from typing import Optional, List
-=======
-from typing import Optional
->>>>>>> upstream/main
+from typing import List
+from copy import deepcopy
 
 import draccus
 import torch
@@ -51,7 +48,6 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
-from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
@@ -68,35 +64,8 @@ from prismatic.util.grokfast import gradfilter_ma, gradfilter_ema
 from merge import merge_lora
 
 
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-
-from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
-from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
-from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
-
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
-# # === Utilities ===
-# # fmt: off
-# def create_vision_transform(vla: nn.Module, input_size: int) -> Callable[[Image.Image], torch.Tensor]:
-#     """Gets image transform for the vision encoder."""
-#     data_cfg = timm.data.resolve_model_data_config(vla.vision_backbone)
-#     data_cfg["input_size"] = (3, input_size, input_size)
-#     return timm.data.create_transform(
-#         input_size=data_cfg["input_size"],
-#         interpolation=data_cfg["interpolation"],
-#         mean=data_cfg["mean"],
-#         std=data_cfg["std"],
-#         crop_pct=1.0,           # Set to 1.0 to disable cropping
-#         crop_mode="center",     # Default crop mode --> no-op when `crop_pct == 1.0`
-#         is_training=False,      # Disable image_aug when loading transform; handled by RLDS dataloader
-#     )
-#
-# # fmt: on
 
 
 @dataclass
@@ -125,21 +94,15 @@ class FinetuneConfig:
     max_images: int = None                                          # Max number of training frames/images (overrides max_steps)
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
-<<<<<<< HEAD
     metric_steps: int = 8                                           # The number of batches to average loss/accuracy metrics over
-    resume_step: int = 0                                            # Fine-tuning learning rate
-=======
->>>>>>> upstream/main
-    learning_rate: float = 5e-4                                     # Fine-tuning learning rate
+    resume_step: int = 0                                            # Global Step to Resume (should match checkpoint)
+    learning_rate: float = 2e-5                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
     grad_filter: str = None                                         # Use 'ema' or 'ma' to enable grokfast
 
     #optim_bits: int = 32                                            # 32-bit or 8-bit precision for AdamW solver
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
-    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
-                                                                    #   continually overwrite the latest checkpoint
-                                                                    #   (If False, saves all checkpoints)
 
     # LoRA Arguments
     use_lora: bool = True                                           # Whether to use LoRA fine-tuning
@@ -150,12 +113,7 @@ class FinetuneConfig:
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
-    run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
-<<<<<<< HEAD
-
     tensorboard_logdir: str = "/data/logs/tensorboard"
-=======
->>>>>>> upstream/main
 
     # fmt: on
 
@@ -169,41 +127,24 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.empty_cache()
 
     # Configure Unique Experiment ID & Log Directory
-<<<<<<< HEAD
     if not cfg.exp_id:
         data_exp = cfg.dataset_name
         if cfg.tasks:
             data_exp = data_exp + '+' + '+'.join(cfg.tasks)
-        exp_id = (
-            f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
+        cfg.exp_id = (
+            f"{cfg.vla_path.split('/')[-1].split('+')[0]}+{data_exp}"
             f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
             f"+lr-{cfg.learning_rate}"
         )
         if cfg.use_lora:
-            exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
+            cfg.exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
         if cfg.use_quantization:
-            exp_id += "+q-4bit"
-        if cfg.run_id_note is not None:
-            exp_id += f"--{cfg.run_id_note}"
-        if cfg.image_aug:
-            exp_id += "--image_aug"
+            cfg.exp_id += "+q-4bit"
+        if cfg.exp_tag:
+            cfg.exp_id += f"+{cfg.exp_tag}"
         cfg.exp_id += f"+{datetime.datetime.now().strftime('%y%m%d_%H%M')}"
-    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
-=======
-    exp_id = (
-        f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
-        f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
-        f"+lr-{cfg.learning_rate}"
-    )
-    if cfg.use_lora:
-        exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
-    if cfg.use_quantization:
-        exp_id += "+q-4bit"
-    if cfg.run_id_note is not None:
-        exp_id += f"--{cfg.run_id_note}"
-    if cfg.image_aug:
-        exp_id += "--image_aug"
->>>>>>> upstream/main
+
+    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`  ({cfg.exp_id})")
 
     # Start =>> Build Directories
     if not cfg.adapter_tmp_dir:
@@ -222,12 +163,6 @@ def finetune(cfg: FinetuneConfig) -> None:
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
-
-    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
-    AutoConfig.register("openvla", OpenVLAConfig)
-    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -413,27 +348,6 @@ def finetune(cfg: FinetuneConfig) -> None:
             metrics.loss_action += torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
             metrics.action_accuracy += 1.0 - metrics.loss_action[-1]
 
-            # Compute gradient step index
-            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
-
-            # Compute smoothened train metrics
-            #   =>> Equal to current step metrics when not using gradient accumulation
-            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
-            smoothened_loss = sum(recent_losses) / len(recent_losses)
-            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
-            smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
-
-            # Push Metrics to W&B (every 10 gradient steps)
-            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
-                wandb.log(
-                    {
-                        "train_loss": smoothened_loss,
-                        "action_accuracy": smoothened_action_accuracy,
-                        "l1_loss": smoothened_l1_loss,
-                    },
-                    step=gradient_step_idx,
-                )
-
             if progress.n > 10 and loss >= metrics.loss.mean() * 1.3:
                 print(f"Step {progress.n}, abnormal loss detected:  loss={loss}  avg={metrics.loss.mean()}")
                 dump_step(
@@ -491,44 +405,6 @@ def finetune(cfg: FinetuneConfig) -> None:
 
         dist.barrier()
 
-
-                # Merge LoRA weights into model backbone for faster inference
-                #   =>> Note that merging is slow and can be done post-hoc to speed up training
-                if cfg.use_lora:
-                    base_vla = AutoModelForVision2Seq.from_pretrained(
-                        cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-                    )
-                    merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-                    merged_vla = merged_vla.merge_and_unload()
-                    if distributed_state.is_main_process:
-                        if cfg.save_latest_checkpoint_only:
-                            # Overwrite latest checkpoint
-                            merged_vla.save_pretrained(run_dir)
-
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
-                        else:
-                            # Prepare to save checkpoint in new directory
-                            checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
-                            os.makedirs(checkpoint_dir, exist_ok=True)
-
-                            # Save dataset statistics to new directory
-                            save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
-
-                            # Save processor and model weights to new directory
-                            processor.save_pretrained(checkpoint_dir)
-                            merged_vla.save_pretrained(checkpoint_dir)
-
-                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
-
-                # Block on Main Process Checkpointing
-                dist.barrier()
-
-            # Stop training when max_steps is reached
-            if gradient_step_idx == cfg.max_steps:
-                print(f"Max step {cfg.max_steps} reached! Stopping training...")
-                break
-
-<<<<<<< HEAD
 
 def save_checkpoint(vla, processor, cfg, steps, metrics):
     # by default, only last checkpoint is kept, continually overwriting it!
@@ -662,8 +538,6 @@ class ProcessInterrupt(threading.Thread):
                 else:
                     print("\nCtrl+D pressed, interrupting training...\n")
 
-=======
->>>>>>> upstream/main
 
 if __name__ == "__main__":
     finetune()
