@@ -30,8 +30,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
-from copy import deepcopy
+from typing import Optional, List
 
 import draccus
 import torch
@@ -48,6 +47,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
@@ -64,10 +64,33 @@ from prismatic.util.grokfast import gradfilter_ma, gradfilter_ema
 from merge import merge_lora
 
 
+from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
+from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
+
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-          
+
+# # === Utilities ===
+# # fmt: off
+# def create_vision_transform(vla: nn.Module, input_size: int) -> Callable[[Image.Image], torch.Tensor]:
+#     """Gets image transform for the vision encoder."""
+#     data_cfg = timm.data.resolve_model_data_config(vla.vision_backbone)
+#     data_cfg["input_size"] = (3, input_size, input_size)
+#     return timm.data.create_transform(
+#         input_size=data_cfg["input_size"],
+#         interpolation=data_cfg["interpolation"],
+#         mean=data_cfg["mean"],
+#         std=data_cfg["std"],
+#         crop_pct=1.0,           # Set to 1.0 to disable cropping
+#         crop_mode="center",     # Default crop mode --> no-op when `crop_pct == 1.0`
+#         is_training=False,      # Disable image_aug when loading transform; handled by RLDS dataloader
+#     )
+#
+# # fmt: on
+
+
 @dataclass
 class FinetuneConfig:
     # fmt: off
@@ -87,7 +110,7 @@ class FinetuneConfig:
     camera: str = "agentview"                                       # Camera to use (agentview, frontview, robot0-eye_in_hand)
     save_dir: Path = None                                           # Directory to dump sample generated episodes to (optional)
     save_freq: int = None                                           # Save every N generated episodes for viewing (optional)
-    
+
     # Fine-tuning Parameters
     batch_size: int = 16                                            # Fine-tuning batch size
     epochs: int = None                                              # Number of training passes through dataset (overrides max_steps)
@@ -95,14 +118,17 @@ class FinetuneConfig:
     max_steps: int = 200_000                                        # Max number of fine-tuning steps (gradient accumulation)
     save_steps: int = 5000                                          # Interval for checkpoint saving
     metric_steps: int = 8                                           # The number of batches to average loss/accuracy metrics over
-    resume_step: int = 0                                            # Global Step to Resume (should match checkpoint)
-    learning_rate: float = 2e-5                                     # Fine-tuning learning rate
+    resume_step: int = 0                                            # Fine-tuning learning rate
+    learning_rate: float = 5e-4                                     # Fine-tuning learning rate
     grad_accumulation_steps: int = 1                                # Gradient accumulation steps
-    grad_filter: str = None                                         # Use 'ema' or 'ma' to enable grokfast 
+    grad_filter: str = None                                         # Use 'ema' or 'ma' to enable grokfast
 
     #optim_bits: int = 32                                            # 32-bit or 8-bit precision for AdamW solver
     image_aug: bool = True                                          # Whether to train with image augmentations
     shuffle_buffer_size: int = 100_000                              # Dataloader shuffle buffer size (can reduce if OOM)
+    save_latest_checkpoint_only: bool = True                        # Whether to save only one checkpoint per run and
+                                                                    #   continually overwrite the latest checkpoint
+                                                                    #   (If False, saves all checkpoints)
 
     # LoRA Arguments
     use_lora: bool = True                                           # Whether to use LoRA fine-tuning
@@ -113,10 +139,12 @@ class FinetuneConfig:
     # Tracking Parameters
     wandb_project: str = "openvla"                                  # Name of W&B project to log to (use default!)
     wandb_entity: str = "stanford-voltron"                          # Name of entity to log under
+    run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
+
     tensorboard_logdir: str = "/data/logs/tensorboard"
-    
+
     # fmt: on
-       
+
 @draccus.wrap()
 def finetune(cfg: FinetuneConfig) -> None:
     # [Validate] Ensure GPU Available & Set Device / Distributed Context
@@ -131,31 +159,32 @@ def finetune(cfg: FinetuneConfig) -> None:
         data_exp = cfg.dataset_name
         if cfg.tasks:
             data_exp = data_exp + '+' + '+'.join(cfg.tasks)
-        cfg.exp_id = (
-            f"{cfg.vla_path.split('/')[-1].split('+')[0]}+{data_exp}"
+        exp_id = (
+            f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
             f"+b{cfg.batch_size * cfg.grad_accumulation_steps}"
             f"+lr-{cfg.learning_rate}"
         )
         if cfg.use_lora:
-            cfg.exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
+            exp_id += f"+lora-r{cfg.lora_rank}+dropout-{cfg.lora_dropout}"
         if cfg.use_quantization:
-            cfg.exp_id += "+q-4bit"
-        if cfg.exp_tag:
-            cfg.exp_id += f"+{cfg.exp_tag}"
+            exp_id += "+q-4bit"
+        if cfg.run_id_note is not None:
+            exp_id += f"--{cfg.run_id_note}"
+        if cfg.image_aug:
+            exp_id += "--image_aug"
         cfg.exp_id += f"+{datetime.datetime.now().strftime('%y%m%d_%H%M')}"
-     
-    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`  ({cfg.exp_id})")
-   
+    print(f"Fine-tuning OpenVLA Model `{cfg.vla_path}` on `{cfg.dataset_name}`")
+
     # Start =>> Build Directories
     if not cfg.adapter_tmp_dir:
         cfg.adapter_tmp_dir = cfg.run_root_dir / 'adapters'
-        
+
     cfg.run_root_dir = cfg.run_root_dir / cfg.exp_id
     cfg.adapter_tmp_dir = cfg.adapter_tmp_dir / cfg.exp_id
 
     os.makedirs(cfg.run_root_dir, exist_ok=True)
     os.makedirs(cfg.adapter_tmp_dir, exist_ok=True)
-    
+
     # Quantization Config =>> only if LoRA fine-tuning
     quantization_config = None
     if cfg.use_quantization:
@@ -163,6 +192,12 @@ def finetune(cfg: FinetuneConfig) -> None:
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
         )
+
+    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+    AutoConfig.register("openvla", OpenVLAConfig)
+    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -199,7 +234,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     trainable_params = [param for param in vla.parameters() if param.requires_grad]
     optimizer = AdamW(trainable_params, lr=cfg.learning_rate) #bnb.optim.AdamW(trainable_params, lr=cfg.learning_rate, optim_bits=cfg.optim_bits)
     grads = None
-        
+
     # Create Action Tokenizer
     action_tokenizer = ActionTokenizer(processor.tokenizer)
 
@@ -223,10 +258,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         if cfg.dataset_name not in OXE_DATASET_CONFIGS:
             data_cfg = deepcopy(OXE_DATASET_CONFIGS['rlds_dataset_builder'])
             OXE_DATASET_CONFIGS[cfg.dataset_name] = data_cfg
-            
+
         if cfg.dataset_name not in OXE_STANDARDIZATION_TRANSFORMS:
             OXE_STANDARDIZATION_TRANSFORMS[cfg.dataset_name] = rlds_dataset_builder_transform
-            
+
         batch_transform = RLDSBatchTransform(
             action_tokenizer,
             processor.tokenizer,
@@ -268,10 +303,10 @@ def finetune(cfg: FinetuneConfig) -> None:
         if simulated:
             raise ValueError(f"cannot train for number of epochs when simulator is used")
         cfg.max_steps = int(len(vla_dataset) * cfg.epochs / cfg.batch_size / cfg.grad_accumulation_steps) #int(len(dataloader) * cfg.epochs / cfg.grad_accumulation_steps)
- 
+
     if cfg.max_images:
         cfg.max_steps = int(cfg.max_images / cfg.batch_size / cfg.grad_accumulation_steps)
-         
+
     # Initialize Logging =>> W&B
     if distributed_state.is_main_process:
         cfg.tensorboard_logdir = os.path.join(cfg.tensorboard_logdir, cfg.exp_id)
@@ -281,7 +316,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         print(f"\nSimulator tasks {cfg.tasks}  (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
     else:
         print(f"\nDataset frames {len(vla_dataset):,} => batches {len(dataloader):,} => steps {len(dataloader)//cfg.grad_accumulation_steps:,} (batch_size={cfg.batch_size}, grad_accumulation_steps={cfg.grad_accumulation_steps})\n\n{pprint.pformat(cfg, indent=2)}\n")
-    
+
     # Store recent train metrics (used for computing smoothened metrics for gradient accumulation)
     metrics = AttributeDict(
         loss = Metric('loss', 'Loss/logits'),
@@ -289,7 +324,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         token_accuracy = Metric('token_accuracy', 'Accuracy/tokens'),
         action_accuracy = Metric('action_accuracy', 'Accuracy/action'),
     )
-    
+
     for metric in metrics.values():
         metric.resize(cfg.metric_steps, cfg.grad_accumulation_steps)
 
@@ -302,20 +337,20 @@ def finetune(cfg: FinetuneConfig) -> None:
                     return
                 yield batch_idx, batch
                 batch_idx += 1
-          
+
     # Allow the user to interrupt training with Ctrl+C
     interrupts = ProcessInterrupt()
     time_begin = time.perf_counter()
-    
+
     # Train!
     with tqdm.tqdm(initial=cfg.resume_step, total=cfg.max_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
-        
+
         for batch_idx, batch in next_batch():
             if interrupts:
                 break
-                
+
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 output: CausalLMOutputWithPast = vla(
                     input_ids=batch["input_ids"].to(device_id),
@@ -336,7 +371,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             action_preds = action_logits.argmax(dim=2)
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
             mask = action_gt > action_tokenizer.action_token_begin_idx
-                
+
             # Compute Accuracy
             correct_preds = (action_preds == action_gt) & mask
             metrics.token_accuracy += correct_preds.sum().float() / mask.sum().float()
@@ -346,7 +381,28 @@ def finetune(cfg: FinetuneConfig) -> None:
             continuous_actions_gt = torch.tensor(action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy()))
 
             metrics.loss_action += torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
-            metrics.action_accuracy += 1.0 - metrics.loss_action[-1] 
+            metrics.action_accuracy += 1.0 - metrics.loss_action[-1]
+
+            # Compute gradient step index
+            gradient_step_idx = batch_idx // cfg.grad_accumulation_steps
+
+            # Compute smoothened train metrics
+            #   =>> Equal to current step metrics when not using gradient accumulation
+            #   =>> Otherwise, equal to the average of metrics observed over micro-batches used for gradient accumulation
+            smoothened_loss = sum(recent_losses) / len(recent_losses)
+            smoothened_action_accuracy = sum(recent_action_accuracies) / len(recent_action_accuracies)
+            smoothened_l1_loss = sum(recent_l1_losses) / len(recent_l1_losses)
+
+            # Push Metrics to W&B (every 10 gradient steps)
+            if distributed_state.is_main_process and gradient_step_idx % 10 == 0:
+                wandb.log(
+                    {
+                        "train_loss": smoothened_loss,
+                        "action_accuracy": smoothened_action_accuracy,
+                        "l1_loss": smoothened_l1_loss,
+                    },
+                    step=gradient_step_idx,
+                )
 
             if progress.n > 10 and loss >= metrics.loss.mean() * 1.3:
                 print(f"Step {progress.n}, abnormal loss detected:  loss={loss}  avg={metrics.loss.mean()}")
@@ -356,30 +412,30 @@ def finetune(cfg: FinetuneConfig) -> None:
                     inputs=batch,
                     outputs=dict(action_preds=action_preds, action_gt=action_gt, continuous_actions_pred=continuous_actions_pred, continuous_actions_gt=continuous_actions_gt)
                 )
-                    
+
             metrics.loss += loss
-            
+
             # Optimizer Step
             if batch_idx == 0 or batch_idx % cfg.grad_accumulation_steps != 0:
                 continue
-   
+
             if cfg.grad_filter == 'ema':
                 grads = gradfilter_ema(vla, grads=grads, alpha=0.98, lamb=2.0)
             elif cfg.grad_filter == 'ma':
                 grads = gradfilter_ma(vla, grads=grads, window_size=100, lamb=lamb)
             elif cfg.grad_filter:
                 raise ValueError(f"grad_filter should be 'ema' or 'ma' (was {cfg.grad_filter})")
-             
+
             if cfg.grad_filter and progress.n == 0:
                 print(f"using grad_filter {cfg.grad_filter}")
-                  
+
             optimizer.step()
             optimizer.zero_grad()
-                
+
             progress.set_description(f"{metrics.loss}  {metrics.token_accuracy}  {metrics.action_accuracy}")
             progress.update() # increments progress.n (global step count)
             print('')
-            
+
             if distributed_state.is_main_process:
                 for metric in metrics.values():
                     tensorboard.add_scalar(metric.tensorboard, metric.step_mean(), progress.n)
@@ -388,23 +444,60 @@ def finetune(cfg: FinetuneConfig) -> None:
                 if distributed_state.is_main_process:
                     save_checkpoint(vla, processor, cfg, progress.n, metrics)
                 dist.barrier()
-                    
+
         # print training stats
         train_time = time.perf_counter() - time_begin
         train_frames = progress.n * cfg.batch_size * cfg.grad_accumulation_steps
         train_rate = train_frames / train_time
-        
+
         print(f"\nDone training after {progress.n} steps, {train_frames} frames  ({int(train_time)} seconds, {train_rate:.2f} fps)")
-        
-        # save final checkpoint and merge LoRA  
+
+        # save final checkpoint and merge LoRA
         if distributed_state.is_main_process:
             save_checkpoint(vla, processor, cfg, progress.n, metrics)
             del vla  # reduce memory to be able to load LoRA
             torch.cuda.empty_cache()
-            merge_lora(cfg.vla_path, cfg.adapter_tmp_dir, cfg.run_root_dir)  
-            
+            merge_lora(cfg.vla_path, cfg.adapter_tmp_dir, cfg.run_root_dir)
+
         dist.barrier()
-        
+
+
+                # Merge LoRA weights into model backbone for faster inference
+                #   =>> Note that merging is slow and can be done post-hoc to speed up training
+                if cfg.use_lora:
+                    base_vla = AutoModelForVision2Seq.from_pretrained(
+                        cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+                    )
+                    merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+                    merged_vla = merged_vla.merge_and_unload()
+                    if distributed_state.is_main_process:
+                        if cfg.save_latest_checkpoint_only:
+                            # Overwrite latest checkpoint
+                            merged_vla.save_pretrained(run_dir)
+
+                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {run_dir}")
+                        else:
+                            # Prepare to save checkpoint in new directory
+                            checkpoint_dir = Path(str(run_dir) + f"--{gradient_step_idx}_chkpt")
+                            os.makedirs(checkpoint_dir, exist_ok=True)
+
+                            # Save dataset statistics to new directory
+                            save_dataset_statistics(vla_dataset.dataset_statistics, checkpoint_dir)
+
+                            # Save processor and model weights to new directory
+                            processor.save_pretrained(checkpoint_dir)
+                            merged_vla.save_pretrained(checkpoint_dir)
+
+                            print(f"Saved Model Checkpoint for Step {gradient_step_idx} at: {checkpoint_dir}")
+
+                # Block on Main Process Checkpointing
+                dist.barrier()
+
+            # Stop training when max_steps is reached
+            if gradient_step_idx == cfg.max_steps:
+                print(f"Max step {cfg.max_steps} reached! Stopping training...")
+                break
+
 
 def save_checkpoint(vla, processor, cfg, steps, metrics):
     # by default, only last checkpoint is kept, continually overwriting it!
@@ -415,26 +508,26 @@ def save_checkpoint(vla, processor, cfg, steps, metrics):
     vla.module.save_pretrained(save_dir)
     save_metrics(metrics, steps, cfg)
 
-     
+
 def save_metrics(metrics, steps, cfg):
     for save_dir in [cfg.run_root_dir, cfg.adapter_tmp_dir]:
         stats_path = save_dir / "train_statistics.json"
         stats_past = []
-        
+
         try:
             with open(stats_path, 'r') as f:
                 stats_past = json.load(f)
         except Exception:
             pass
-        
+
         stats = {
-            'steps': steps, 
-            'frames': steps * cfg.batch_size * cfg.grad_accumulation_steps,   
+            'steps': steps,
+            'frames': steps * cfg.batch_size * cfg.grad_accumulation_steps,
         }
-        
+
         for metric in metrics.values():
             stats[metric.name] = {
-                'step': metric.step_mean(),     
+                'step': metric.step_mean(),
                 'mean': metric.mean(),
             }
 
@@ -443,9 +536,9 @@ def save_metrics(metrics, steps, cfg):
                 json.dump(stats_past + [stats], f, indent=2)
         except Exception as error:
             print(f"Exception while saving training stats to {stats_path}\n  {error}")
-            
+
     print(f"Saving training stats to {stats_path}")
-        
+
 
 def dump_step(step, cfg, metrics, inputs, outputs):
     for save_dir in [cfg.run_root_dir, cfg.adapter_tmp_dir]:
@@ -453,7 +546,7 @@ def dump_step(step, cfg, metrics, inputs, outputs):
         os.makedirs(save_dir, exist_ok=True)
         save_path = save_dir / f"rank={torch.distributed.get_rank()}_step={step}.json"
         try:
-            for k,v in inputs.items(): 
+            for k,v in inputs.items():
                 if isinstance(v, (np.ndarray, torch.Tensor)):
                     inputs[k] = v = v.tolist()
                 if isinstance(v, list) and len(v) > 0 and isinstance(v[0], bytes):
@@ -471,58 +564,58 @@ def dump_step(step, cfg, metrics, inputs, outputs):
         except Exception as error:
             print(f"Exception while saving training stats to {save_path}\n  {error}")
     print(f"Saved debug dump to {save_path}")
-                   
+
 class Metric:
     # Accumulate / average training stats
     def __init__(self, name, tensorboard=None, window=10, step_window=None):
         self.name = name
         self.tensorboard = tensorboard
         self.resize(window, step_window)
-     
+
     def __str__(self):
         return f"{self.name}={self.step_mean():.4f} ~{self.mean():.4f}"
-          
+
     def __len__(self):
         return len(self.history)
-    
+
     def __getitem__(self, index):
         return self.history[index]
-     
+
     def __iadd__(self, value):
         self.append(value)
         return self
-        
+
     def append(self, value):
         if isinstance(value, torch.Tensor):
             value = value.item()
         self.history.append(value)
-           
+
     def mean(self, window=None):
         if window and window <= len(self.history):
             history = [self.history[-x-1] for x in range(window)] #self.history[-window:]
         else:
             history = self.history
-        return sum(history) / len(history)      
-  
+        return sum(history) / len(history)
+
     def step_mean(self):
         return self.mean(self.step_window)
-        
+
     def resize(self, window=10, step_window=None):
         self.history = deque(maxlen=window)
         self.window = window
         self.step_window = step_window
-   
-   
+
+
 class ProcessInterrupt(threading.Thread):
     # Ctrl+D interrupt handler
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.interrupts = 0
         self.start()
-    
+
     def __len__(self):
         return self.interrupts
-            
+
     def run(self):
         print(">> Press Ctrl+D to save weights and stop training early\n")
         while True:
@@ -537,7 +630,7 @@ class ProcessInterrupt(threading.Thread):
                     print("\nPress Ctrl+D again for ungraceful termination\n")
                 else:
                     print("\nCtrl+D pressed, interrupting training...\n")
- 
-          
+
+
 if __name__ == "__main__":
     finetune()
